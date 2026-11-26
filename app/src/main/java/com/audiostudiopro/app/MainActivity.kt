@@ -170,21 +170,24 @@ import androidx.media3.common.Player
 import java.util.Locale
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.random.Random
 
-// Spotify Encore + Apple HIG Matte Obsidian Design Tokens
-private val CanvasBg = Color(0xFF0D0D10)
-private val SurfaceElevated = Color(0xFF17171C)
-private val SurfaceChip = Color(0xFF222229)
-private val SurfaceSheet = Color(0xFF141419)
-private val DividerSubtle = Color.White.copy(alpha = 0.08f)
-private val GlassDock = Color.White.copy(alpha = 0.09f)
+// Apple HIG Liquid Glass + Obsidian Ambient Design Tokens
+private val CanvasBg = Color(0xFF08080A)
+private val SurfaceElevated = Color.White.copy(alpha = 0.06f)
+private val SurfaceChip = Color.White.copy(alpha = 0.09f)
+private val SurfaceSheet = Color(0xFF111117)
+private val GlassBarFill = Color(0xFF13131C).copy(alpha = 0.84f)
+private val DividerSubtle = Color.White.copy(alpha = 0.09f)
+private val GlassDock = Color.White.copy(alpha = 0.10f)
 private val GlassBorder = Color.White.copy(alpha = 0.14f)
+private val GlassSpecular = Color.White.copy(alpha = 0.24f)
 private val TextPrimary = Color(0xFFF5F5F7)
-private val TextSecondary = Color(0xFFA0A0AA)
-private val TextMuted = Color(0xFF6B6B76)
+private val TextSecondary = Color(0xFFA2A2AD)
+private val TextMuted = Color(0xFF6C6C78)
 private val SpotifyAccentFallback = Color(0xFF1ED760)
 
 private enum class MainTab(val label: String, val icon: ImageVector) {
@@ -360,18 +363,25 @@ private fun AudioStudioProApp(vm: MusicViewModel = viewModel()) {
             .fillMaxSize()
             .background(CanvasBg)
     ) {
-        Column(
+        // Dynamic Song-Reactive Ambient Aura across every screen
+        AmbientGlowCanvas(
+            primary = animPrimary,
+            secondary = animSecondary,
+            intensity = if (playback.isPlaying) 0.34f else 0.18f,
+            animateDrift = playback.isPlaying
+        )
+
+        // Full-Screen Content Layer extending smoothly beneath floating Liquid Glass chrome
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
         ) {
-            // Main Screen Content
-            Box(modifier = Modifier.weight(1f)) {
-                val listBottomPad = when {
-                    isMultiSelectActive -> 84.dp
-                    playback.currentTrack != null -> 78.dp
-                    else -> 16.dp
-                }
+            val listBottomPad = when {
+                isMultiSelectActive -> 168.dp
+                playback.currentTrack != null -> 164.dp
+                else -> 98.dp
+            }
 
                 when {
                     // Playlist Detail Overlay inside Playlists Tab
@@ -521,100 +531,117 @@ private fun AudioStudioProApp(vm: MusicViewModel = viewModel()) {
                     }
                 }
 
-                // Multi-Select Batch Action Dock
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = isMultiSelectActive && !showNowPlaying,
-                    enter = slideInVertically { it } + fadeIn(),
-                    exit = slideOutVertically { it } + fadeOut(),
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+        }
+
+        // Progressive bottom edge fade + Floating Liquid Glass Chrome (Mini-Player + Floating Pill Nav Bar)
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .background(
+                    Brush.verticalGradient(
+                        0.0f to Color.Transparent,
+                        0.38f to CanvasBg.copy(alpha = 0.65f),
+                        1.0f to CanvasBg.copy(alpha = 0.94f)
+                    )
+                )
+                .navigationBarsPadding()
+                .padding(top = 12.dp, bottom = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            // Multi-Select Floating Glass Batch Action Dock
+            androidx.compose.animation.AnimatedVisibility(
+                visible = isMultiSelectActive && !showNowPlaying,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier.padding(horizontal = 16.dp)
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = GlassBarFill,
+                    border = BorderStroke(
+                        1.dp,
+                        Brush.verticalGradient(listOf(GlassSpecular, GlassBorder.copy(alpha = 0.08f)))
+                    ),
+                    shadowElevation = 18.dp,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Surface(
-                        shape = RoundedCornerShape(14.dp),
-                        color = Color(0xFF1E1E26),
-                        border = BorderStroke(1.dp, GlassBorder),
-                        shadowElevation = 14.dp,
-                        modifier = Modifier.fillMaxWidth()
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        Surface(
+                            onClick = {
+                                val chosen = multiSelectIds
+                                multiSelectIds = emptySet()
+                                openBeamWithTracks(chosen, BeamModeTab.SEND)
+                            },
+                            shape = CircleShape,
+                            color = animAccent,
+                            modifier = Modifier.weight(1f)
                         ) {
-                            Surface(
-                                onClick = {
-                                    val chosen = multiSelectIds
-                                    multiSelectIds = emptySet()
-                                    openBeamWithTracks(chosen, BeamModeTab.SEND)
-                                },
-                                shape = CircleShape,
-                                color = animAccent,
-                                modifier = Modifier.weight(1f)
+                            Row(
+                                modifier = Modifier.padding(vertical = 10.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Rounded.WifiTethering, contentDescription = null, tint = CanvasBg, modifier = Modifier.size(17.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Beam (${multiSelectIds.size})", color = CanvasBg, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                }
+                                Icon(Icons.Rounded.WifiTethering, contentDescription = null, tint = CanvasBg, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Beam (${multiSelectIds.size})", color = CanvasBg, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                             }
-                            Surface(
-                                onClick = {
-                                    val chosenList = tracks.filter { multiSelectIds.contains(it.id) }
-                                    vm.queueBatchNext(chosenList)
-                                    multiSelectIds = emptySet()
-                                },
-                                shape = CircleShape,
-                                color = SurfaceChip,
-                                modifier = Modifier.weight(1f)
+                        }
+                        Surface(
+                            onClick = {
+                                val chosenList = tracks.filter { multiSelectIds.contains(it.id) }
+                                vm.queueBatchNext(chosenList)
+                                multiSelectIds = emptySet()
+                            },
+                            shape = CircleShape,
+                            color = SurfaceChip,
+                            border = BorderStroke(1.dp, GlassBorder),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(vertical = 10.dp),
+                                horizontalArrangement = Arrangement.Center,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(vertical = 10.dp),
-                                    horizontalArrangement = Arrangement.Center,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(Icons.Rounded.QueuePlayNext, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(17.dp))
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Play Next", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                                }
+                                Icon(Icons.Rounded.QueuePlayNext, contentDescription = null, tint = TextPrimary, modifier = Modifier.size(17.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Play Next", color = TextPrimary, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                             }
                         }
                     }
                 }
+            }
 
-                // Docked Slim Spotify-Style Dynamic Mini-Player (58dp)
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = playback.currentTrack != null && !showNowPlaying && !isMultiSelectActive,
-                    enter = slideInVertically { it } + fadeIn(),
-                    exit = slideOutVertically { it } + fadeOut(),
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                ) {
-                    playback.currentTrack?.let { current ->
-                        DockedSpotifyMiniPlayer(
-                            track = current,
-                            isPlaying = playback.isPlaying,
-                            progress = if (playback.durationMs > 0L) {
-                                (playback.positionMs.toFloat() / playback.durationMs.toFloat()).coerceIn(0f, 1f)
-                            } else 0f,
-                            surfaceTint = lerp(SurfaceElevated, animSecondary, 0.55f),
-                            accentColor = animAccent,
-                            dspActive = dspState.hasActiveProcessing,
-                            onExpand = { showNowPlaying = true },
-                            onOpenAudioLab = { showAudioLabSheet = true },
-                            onTogglePlayPause = vm::togglePlayPause,
-                            onSkipNext = vm::skipNext,
-                            onSkipPrev = vm::skipPrevious
-                        )
-                    }
+            // Floating Liquid Glass Mini-Player (dynamically tinted with active song aura)
+            androidx.compose.animation.AnimatedVisibility(
+                visible = playback.currentTrack != null && !showNowPlaying && !isMultiSelectActive,
+                enter = slideInVertically { it } + fadeIn(),
+                exit = slideOutVertically { it } + fadeOut(),
+                modifier = Modifier.padding(horizontal = 16.dp)
+            ) {
+                playback.currentTrack?.let { current ->
+                    DockedSpotifyMiniPlayer(
+                        track = current,
+                        isPlaying = playback.isPlaying,
+                        progress = if (playback.durationMs > 0L) {
+                            (playback.positionMs.toFloat() / playback.durationMs.toFloat()).coerceIn(0f, 1f)
+                        } else 0f,
+                        surfaceTint = lerp(Color(0xFF14141D), animSecondary, 0.48f).copy(alpha = 0.86f),
+                        accentColor = animAccent,
+                        dspActive = dspState.hasActiveProcessing,
+                        onExpand = { showNowPlaying = true },
+                        onOpenAudioLab = { showAudioLabSheet = true },
+                        onTogglePlayPause = vm::togglePlayPause,
+                        onSkipNext = vm::skipNext,
+                        onSkipPrev = vm::skipPrevious
+                    )
                 }
             }
 
-            // Sleek 4-Tab Spotify Bottom Navigation Bar
+            // Floating Liquid Glass Pill Bottom Navigation Bar
             SpotifyBottomNavBar(
                 currentTab = currentTab,
                 beamActive = beamState.mode == BeamMode.SENDING || beamState.mode == BeamMode.RECEIVING,
@@ -833,43 +860,94 @@ private fun AudioStudioProApp(vm: MusicViewModel = viewModel()) {
 // ============================================================================
 
 @Composable
+private fun AmbientGlowCanvas(
+    primary: Color,
+    secondary: Color,
+    intensity: Float,
+    animateDrift: Boolean = false
+) {
+    val infinite = rememberInfiniteTransition(label = "auroraDrift")
+    val phase by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = (2.0 * PI).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 15_000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "auroraPhase"
+    )
+
+    val driftX = if (animateDrift) cos(phase) * 0.08f else 0f
+    val driftY = if (animateDrift) sin(phase) * 0.06f else 0f
+
+    Canvas(modifier = Modifier.fillMaxSize()) {
+        val c1 = Offset(size.width * (0.20f + driftX), size.height * (0.12f + driftY))
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(primary.copy(alpha = intensity), Color.Transparent),
+                center = c1,
+                radius = size.width * 1.05f
+            ),
+            radius = size.width * 1.05f,
+            center = c1
+        )
+        val c2 = Offset(size.width * (0.84f - driftX), size.height * (0.76f - driftY))
+        drawCircle(
+            brush = Brush.radialGradient(
+                colors = listOf(secondary.copy(alpha = intensity * 0.92f), Color.Transparent),
+                center = c2,
+                radius = size.width * 0.96f
+            ),
+            radius = size.width * 0.96f,
+            center = c2
+        )
+    }
+}
+
+@Composable
 private fun SpotifyBottomNavBar(
     currentTab: MainTab,
     beamActive: Boolean,
     accentColor: Color,
     onSelectTab: (MainTab) -> Unit
 ) {
-    Column(
+    Surface(
+        shape = CircleShape,
+        color = GlassBarFill,
+        border = BorderStroke(
+            width = 1.dp,
+            brush = Brush.verticalGradient(listOf(GlassSpecular, Color.White.copy(alpha = 0.06f)))
+        ),
+        shadowElevation = 20.dp,
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF0A0A0D))
-            .navigationBarsPadding()
+            .padding(horizontal = 16.dp)
     ) {
-        HorizontalDivider(color = DividerSubtle, thickness = 0.7.dp)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(58.dp)
-                .padding(horizontal = 8.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 6.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             MainTab.entries.forEach { tab ->
                 val selected = tab == currentTab
                 val tint = when {
-                    selected -> TextPrimary
+                    selected -> accentColor
                     tab == MainTab.BEAM && beamActive -> accentColor
-                    else -> TextMuted
+                    else -> TextSecondary
                 }
                 Column(
                     modifier = Modifier
                         .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
+                        .clip(CircleShape)
+                        .background(if (selected) accentColor.copy(alpha = 0.16f) else Color.Transparent)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
                             onClick = { onSelectTab(tab) }
                         )
-                        .padding(vertical = 6.dp),
+                        .padding(vertical = 7.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
@@ -878,7 +956,7 @@ private fun SpotifyBottomNavBar(
                             imageVector = tab.icon,
                             contentDescription = tab.label,
                             tint = tint,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(21.dp)
                         )
                         if (tab == MainTab.BEAM && beamActive) {
                             Box(
@@ -893,9 +971,9 @@ private fun SpotifyBottomNavBar(
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
                         text = tab.label,
-                        color = tint,
+                        color = if (selected) TextPrimary else tint,
                         fontSize = 10.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                         maxLines = 1
                     )
                 }
@@ -922,9 +1000,13 @@ private fun DockedSpotifyMiniPlayer(
 
     Surface(
         onClick = onExpand,
-        shape = RoundedCornerShape(10.dp),
+        shape = RoundedCornerShape(20.dp),
         color = surfaceTint,
-        shadowElevation = 10.dp,
+        border = BorderStroke(
+            width = 1.dp,
+            brush = Brush.verticalGradient(listOf(GlassSpecular, Color.White.copy(alpha = 0.07f)))
+        ),
+        shadowElevation = 22.dp,
         modifier = Modifier
             .fillMaxWidth()
             .pointerInput(track.id) {
@@ -946,17 +1028,17 @@ private fun DockedSpotifyMiniPlayer(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp)
-                    .padding(start = 8.dp, end = 6.dp),
+                    .height(58.dp)
+                    .padding(start = 10.dp, end = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 TrackArtwork(
                     artworkPath = track.artworkPath,
                     seed = track.id,
                     size = 42.dp,
-                    cornerRadius = 6.dp
+                    cornerRadius = 10.dp
                 )
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(11.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = track.title,
@@ -994,19 +1076,19 @@ private fun DockedSpotifyMiniPlayer(
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 8.dp)
-                    .height(2.dp)
+                    .padding(horizontal = 12.dp)
+                    .height(2.5.dp)
                     .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.16f))
+                    .background(Color.White.copy(alpha = 0.14f))
             ) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth(progress)
-                        .height(2.dp)
-                        .background(TextPrimary)
+                        .height(2.5.dp)
+                        .background(Brush.horizontalGradient(listOf(accentColor.copy(alpha = 0.72f), accentColor)))
                 )
             }
-            Spacer(modifier = Modifier.height(1.dp))
+            Spacer(modifier = Modifier.height(2.dp))
         }
     }
 }
@@ -1090,34 +1172,52 @@ private fun LibraryScreen(
                     softWrap = false,
                     modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onSortClick) {
-                    Icon(
-                        imageVector = Icons.Rounded.SwapVert,
-                        contentDescription = "Sort tracks",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(22.dp)
-                    )
-                }
-                IconButton(onClick = onImportClick, enabled = !isImporting) {
-                    if (isImporting) {
-                        CircularProgressIndicator(color = TextPrimary, strokeWidth = 2.dp, modifier = Modifier.size(20.dp))
-                    } else {
+                Surface(
+                    onClick = onSortClick,
+                    shape = CircleShape,
+                    color = SurfaceChip,
+                    border = BorderStroke(1.dp, GlassBorder),
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = "Import music",
+                            imageVector = Icons.Rounded.SwapVert,
+                            contentDescription = "Sort tracks",
                             tint = TextPrimary,
-                            modifier = Modifier.size(26.dp)
+                            modifier = Modifier.size(19.dp)
                         )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Surface(
+                    onClick = onImportClick,
+                    enabled = !isImporting,
+                    shape = CircleShape,
+                    color = GlassDock,
+                    border = BorderStroke(1.dp, GlassSpecular),
+                    modifier = Modifier.size(38.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        if (isImporting) {
+                            CircularProgressIndicator(color = TextPrimary, strokeWidth = 2.dp, modifier = Modifier.size(17.dp))
+                        } else {
+                            Icon(
+                                imageVector = Icons.Rounded.Add,
+                                contentDescription = "Import music",
+                                tint = TextPrimary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
                     }
                 }
             }
         }
 
-        // Single Slim Filter Chip Row
+        // Single Slim Frosted Glass Filter Chip Row
         if (totalLibrarySize > 0) {
             LazyRow(
                 modifier = Modifier.fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = 18.dp, vertical = 5.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(LibraryFilter.entries) { filter ->
@@ -1125,7 +1225,8 @@ private fun LibraryScreen(
                     Surface(
                         onClick = { onSelectFilter(filter) },
                         shape = CircleShape,
-                        color = if (active) accentColor else SurfaceChip
+                        color = if (active) accentColor else SurfaceChip,
+                        border = BorderStroke(1.dp, if (active) accentColor else GlassBorder)
                     ) {
                         Text(
                             text = filter.label,
@@ -1292,21 +1393,41 @@ private fun FlatTrackRow(
     onToggleLike: () -> Unit,
     onMoreClick: () -> Unit
 ) {
+    val highlighted = isSelected || isCurrent
     val rowBg = when {
-        isSelected -> accentColor.copy(alpha = 0.14f)
-        isCurrent -> Color.White.copy(alpha = 0.04f)
+        isSelected -> accentColor.copy(alpha = 0.18f)
+        isCurrent -> accentColor.copy(alpha = 0.12f)
+        else -> Color.Transparent
+    }
+    val rowBorder = when {
+        isSelected -> accentColor.copy(alpha = 0.50f)
+        isCurrent -> accentColor.copy(alpha = 0.34f)
         else -> Color.Transparent
     }
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .padding(horizontal = if (highlighted) 10.dp else 0.dp, vertical = if (highlighted) 2.dp else 0.dp)
+            .clip(RoundedCornerShape(if (highlighted) 14.dp else 0.dp))
             .background(rowBg)
+            .then(
+                if (highlighted) {
+                    Modifier.border(1.dp, rowBorder, RoundedCornerShape(14.dp))
+                } else {
+                    Modifier
+                }
+            )
             .combinedClickable(
                 onClick = onClick,
                 onLongClick = onLongClick
             )
-            .padding(start = 18.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+            .padding(
+                start = if (highlighted) 10.dp else 18.dp,
+                end = if (highlighted) 4.dp else 6.dp,
+                top = 8.dp,
+                bottom = 8.dp
+            ),
         verticalAlignment = Alignment.CenterVertically
     ) {
         if (multiSelectMode) {
@@ -1450,14 +1571,15 @@ private fun SearchScreen(
             modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 10.dp)
         )
 
-        // Slim 42dp Spotify-style Search Bar
+        // Slim 42dp Frosted Glass Search Pill
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 18.dp)
                 .height(42.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF24242B))
+                .clip(RoundedCornerShape(12.dp))
+                .background(SurfaceChip)
+                .border(1.dp, GlassBorder, RoundedCornerShape(12.dp))
                 .padding(horizontal = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -1614,8 +1736,9 @@ private fun BrowseCategoryTile(
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(10.dp),
-        color = bgColor,
+        shape = RoundedCornerShape(14.dp),
+        color = bgColor.copy(alpha = 0.72f),
+        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.14f)),
         modifier = modifier.height(78.dp)
     ) {
         Column(
@@ -2518,22 +2641,13 @@ private fun FullScreenNowPlaying(
         dspState.abLoop.pointBMs?.let { (it.toFloat() / duration.toFloat()).coerceIn(0f, 1f) }
     } else null
 
-    val topBackdrop = lerp(CanvasBg, primaryColor, 0.42f)
-    val midBackdrop = lerp(CanvasBg, secondaryColor, 0.35f)
     val touchBarrier = remember { MutableInteractionSource() }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
             .graphicsLayer { translationY = pullDownOffsetPx.coerceAtLeast(0f) }
-            .background(
-                Brush.verticalGradient(
-                    0.0f to topBackdrop,
-                    0.46f to midBackdrop,
-                    0.82f to CanvasBg,
-                    1.0f to CanvasBg
-                )
-            )
+            .background(CanvasBg)
             .clickable(interactionSource = touchBarrier, indication = null, onClick = {})
             .pointerInput(Unit) {
                 detectVerticalDragGestures(
@@ -2548,6 +2662,13 @@ private fun FullScreenNowPlaying(
                 )
             }
     ) {
+        AmbientGlowCanvas(
+            primary = primaryColor,
+            secondary = secondaryColor,
+            intensity = if (playback.isPlaying) 0.54f else 0.30f,
+            animateDrift = playback.isPlaying
+        )
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
