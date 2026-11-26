@@ -522,7 +522,7 @@ private fun AudioStudioProApp(vm: MusicViewModel = viewModel()) {
                 }
 
                 // Multi-Select Batch Action Dock
-                AnimatedVisibility(
+                androidx.compose.animation.AnimatedVisibility(
                     visible = isMultiSelectActive && !showNowPlaying,
                     enter = slideInVertically { it } + fadeIn(),
                     exit = slideOutVertically { it } + fadeOut(),
@@ -586,7 +586,7 @@ private fun AudioStudioProApp(vm: MusicViewModel = viewModel()) {
                 }
 
                 // Docked Slim Spotify-Style Dynamic Mini-Player (58dp)
-                AnimatedVisibility(
+                androidx.compose.animation.AnimatedVisibility(
                     visible = playback.currentTrack != null && !showNowPlaying && !isMultiSelectActive,
                     enter = slideInVertically { it } + fadeIn(),
                     exit = slideOutVertically { it } + fadeOut(),
@@ -1576,7 +1576,7 @@ private fun SearchScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
-                Text("No matches for "$query"", color = TextSecondary, fontSize = 14.sp)
+                Text("No matches for \"$query\"", color = TextSecondary, fontSize = 14.sp)
             }
         } else {
             LazyColumn(
