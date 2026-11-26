@@ -3,6 +3,8 @@ package com.audiostudiopro.app
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
@@ -37,8 +39,35 @@ data class AudioTrack(
     val album: String,
     val durationMs: Long,
     val artworkPath: String? = null,
-    val dateAdded: Long = System.currentTimeMillis()
+    val dateAdded: Long = System.currentTimeMillis(),
+    val codec: String = "AUDIO",
+    val sampleRateHz: Int = 0,
+    val bitrateKbps: Int = 0,
+    val playCount: Int = 0,
+    val lastPlayedAt: Long = 0L
 ) {
+    val isLossless: Boolean
+        get() = codec.uppercase(Locale.US) in setOf("FLAC", "WAV", "ALAC", "PCM", "AIFF")
+
+    val qualityBadge: String
+        get() {
+            val parts = mutableListOf<String>()
+            if (codec.isNotBlank() && codec != "AUDIO") parts.add(codec.uppercase(Locale.US))
+            if (sampleRateHz > 0) {
+                val khz = sampleRateHz / 1000f
+                val formatted = if (sampleRateHz % 1000 == 0) {
+                    String.format(Locale.US, "%.0f kHz", khz)
+                } else {
+                    String.format(Locale.US, "%.1f kHz", khz)
+                }
+                parts.add(formatted)
+            }
+            if (bitrateKbps > 0) {
+                parts.add("${bitrateKbps} kbps")
+            }
+            return if (parts.isEmpty()) "LOCAL STUDIO" else parts.joinToString(" • ")
+        }
+
     fun toMediaItem(): MediaItem {
         val metadataBuilder = MediaMetadata.Builder()
             .setTitle(title)
@@ -66,6 +95,20 @@ data class UserPlaylist(
     val trackIds: List<String> = emptyList(),
     val createdAt: Long = System.currentTimeMillis()
 )
+
+enum class LibrarySort(val label: String) {
+    RECENT("Newest"),
+    TITLE("Title A–Z"),
+    ARTIST("Artist"),
+    DURATION("Length"),
+    MOST_PLAYED("Most Played")
+}
+
+enum class LibraryFilter(val label: String) {
+    ALL("All Tracks"),
+    LOSSLESS("Lossless"),
+    RECENTLY_PLAYED("Recent")
+}
 
 data class AmbientPalette(
     val primary: Color,
@@ -422,15 +465,24 @@ object MetadataExtractor {
 
     suspend fun extractTrack(context: Context, uri: Uri): AudioTrack = withContext(Dispatchers.IO) {
         val id = UUID.randomUUID().toString()
-        val fallbackName = queryDisplayName(context, uri)
+        val displayName = queryDisplayName(context, uri)
+        val fallbackName = displayName
             ?.substringBeforeLast('.')
             ?.ifBlank { null }
             ?: "Unknown Track"
+        val extCodec = displayName
+            ?.substringAfterLast('.', "")
+            ?.uppercase(Locale.US)
+            ?.takeIf { it.length in 2..5 }
+            ?: "AUDIO"
 
         var title = fallbackName
         var artist = "Unknown Artist"
         var album = "Local Studio"
         var durationMs = 0L
+        var bitrateKbps = 0
+        var sampleRateHz = 0
+        var codec = extCodec
         var artworkPath: String? = null
 
         val retriever = MediaMetadataRetriever()
@@ -444,6 +496,8 @@ object MetadataExtractor {
                 ?.trim()?.takeIf { it.isNotEmpty() }?.let { album = it }
             retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                 ?.toLongOrNull()?.let { durationMs = it.coerceAtLeast(0L) }
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)
+                ?.toIntOrNull()?.let { bitrateKbps = (it / 1000).coerceAtLeast(0) }
 
             val embeddedArt = retriever.embeddedPicture
             if (embeddedArt != null && embeddedArt.isNotEmpty()) {
@@ -452,6 +506,24 @@ object MetadataExtractor {
         }
         runCatching { retriever.release() }
 
+        // Probe codec & sample rate cleanly via MediaExtractor header read
+        val extractor = MediaExtractor()
+        runCatching {
+            extractor.setDataSource(context, uri, null)
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) {
+                    if (format.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        sampleRateHz = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    }
+                    codec = mimeToCodecLabel(mime, extCodec)
+                    break
+                }
+            }
+        }
+        runCatching { extractor.release() }
+
         AudioTrack(
             id = id,
             uriString = uri.toString(),
@@ -459,11 +531,46 @@ object MetadataExtractor {
             artist = artist,
             album = album,
             durationMs = durationMs,
-            artworkPath = artworkPath
+            artworkPath = artworkPath,
+            codec = codec,
+            sampleRateHz = sampleRateHz,
+            bitrateKbps = bitrateKbps
         )
     }
 
+    suspend fun extractTrackFromFile(
+        context: Context,
+        file: File,
+        overrideTitle: String? = null,
+        overrideArtist: String? = null,
+        overrideAlbum: String? = null
+    ): AudioTrack {
+        val base = extractTrack(context, Uri.fromFile(file))
+        return base.copy(
+            title = overrideTitle?.takeIf { it.isNotBlank() } ?: base.title,
+            artist = overrideArtist?.takeIf { it.isNotBlank() } ?: base.artist,
+            album = overrideAlbum?.takeIf { it.isNotBlank() } ?: base.album
+        )
+    }
+
+    private fun mimeToCodecLabel(mime: String, fallback: String): String {
+        val lower = mime.lowercase(Locale.US)
+        return when {
+            "flac" in lower -> "FLAC"
+            "mpeg" in lower -> "MP3"
+            "mp4a" in lower || "aac" in lower -> "AAC"
+            "opus" in lower -> "OPUS"
+            "vorbis" in lower -> "OGG"
+            "raw" in lower || "wav" in lower -> "WAV"
+            "alac" in lower -> "ALAC"
+            else -> fallback
+        }
+    }
+
     private fun queryDisplayName(context: Context, uri: Uri): String? {
+        if (uri.scheme == "file") {
+            return uri.lastPathSegment
+        }
         return runCatching {
             context.contentResolver.query(
                 uri,
@@ -527,7 +634,12 @@ class LocalLibraryStore(context: Context) {
                             album = o.optString("album", "Local Studio"),
                             durationMs = o.optLong("durationMs", 0L),
                             artworkPath = o.optString("artworkPath", "").ifBlank { null },
-                            dateAdded = o.optLong("dateAdded", 0L)
+                            dateAdded = o.optLong("dateAdded", 0L),
+                            codec = o.optString("codec", "AUDIO"),
+                            sampleRateHz = o.optInt("sampleRateHz", 0),
+                            bitrateKbps = o.optInt("bitrateKbps", 0),
+                            playCount = o.optInt("playCount", 0),
+                            lastPlayedAt = o.optLong("lastPlayedAt", 0L)
                         )
                     )
                 }
@@ -548,6 +660,11 @@ class LocalLibraryStore(context: Context) {
                     put("durationMs", t.durationMs)
                     put("artworkPath", t.artworkPath ?: "")
                     put("dateAdded", t.dateAdded)
+                    put("codec", t.codec)
+                    put("sampleRateHz", t.sampleRateHz)
+                    put("bitrateKbps", t.bitrateKbps)
+                    put("playCount", t.playCount)
+                    put("lastPlayedAt", t.lastPlayedAt)
                 }
             )
         }
@@ -618,5 +735,15 @@ fun formatDuration(ms: Long): String {
         String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
     } else {
         String.format(Locale.US, "%d:%02d", minutes, seconds)
+    }
+}
+
+fun formatBytes(bytes: Long): String {
+    if (bytes <= 0L) return "0 MB"
+    val mb = bytes / (1024.0 * 1024.0)
+    return if (mb >= 1000.0) {
+        String.format(Locale.US, "%.2f GB", mb / 1024.0)
+    } else {
+        String.format(Locale.US, "%.1f MB", mb)
     }
 }

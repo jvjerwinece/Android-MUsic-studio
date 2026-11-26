@@ -114,7 +114,6 @@ class PlaybackService : MediaSessionService() {
                     bassBoostStrength = state.bassBoostStrength
                 )
 
-                // Only dispatch AudioFlinger IPC calls when EQ/Bass settings actually change
                 if (eqSnapshot != lastEqSnapshot) {
                     lastEqSnapshot = eqSnapshot
                     val sid = exoPlayer.audioSessionId
@@ -199,11 +198,6 @@ class PlaybackService : MediaSessionService() {
         return mediaSession
     }
 
-    /**
-     * Mandatory Background Persistence:
-     * Keep audio playing seamlessly with lockscreen/notification controls even when the user
-     * swipes the app away from Recents, as long as playback is active and queued.
-     */
     override fun onTaskRemoved(rootIntent: Intent?) {
         val player = mediaSession?.player
         if (player == null ||

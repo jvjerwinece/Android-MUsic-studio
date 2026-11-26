@@ -40,6 +40,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
     private val store = LocalLibraryStore(appContext)
+    private val beamEngine = StudioBeamEngine(appContext, viewModelScope)
 
     private val _tracks = MutableStateFlow<List<AudioTrack>>(emptyList())
     val tracks: StateFlow<List<AudioTrack>> = _tracks.asStateFlow()
@@ -52,6 +53,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _searchQuery = MutableStateFlow("")
     val searchQuery: StateFlow<String> = _searchQuery.asStateFlow()
+
+    private val _sortOrder = MutableStateFlow(LibrarySort.RECENT)
+    val sortOrder: StateFlow<LibrarySort> = _sortOrder.asStateFlow()
+
+    private val _filterMode = MutableStateFlow(LibraryFilter.ALL)
+    val filterMode: StateFlow<LibraryFilter> = _filterMode.asStateFlow()
 
     private val _playbackState = MutableStateFlow(PlaybackUiState())
     val playbackState: StateFlow<PlaybackUiState> = _playbackState.asStateFlow()
@@ -66,9 +73,11 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
     val dspState: StateFlow<DspState> = StudioEngineBridge.dspState
+    val beamState: StateFlow<StudioBeamUiState> = beamEngine.state
 
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
+    private var lastRecordedPlayTrackId: String? = null
 
     private val controllerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -144,7 +153,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                delay(250L)
+                delay(200L)
             }
         }
     }
@@ -184,8 +193,30 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             currentQueueIndex = currentIndex
         )
 
+        if (currentTrack != null && controller.isPlaying && currentTrack.id != lastRecordedPlayTrackId) {
+            lastRecordedPlayTrackId = currentTrack.id
+            recordTrackPlay(currentTrack.id)
+        }
+
         if (currentTrack?.id != previousTrackId) {
             refreshAmbientPalette(currentTrack)
+        }
+    }
+
+    private fun recordTrackPlay(trackId: String) {
+        val now = System.currentTimeMillis()
+        var changed = false
+        val updated = _tracks.value.map { t ->
+            if (t.id == trackId) {
+                changed = true
+                t.copy(playCount = t.playCount + 1, lastPlayedAt = now)
+            } else {
+                t
+            }
+        }
+        if (changed) {
+            _tracks.value = updated
+            store.saveTracks(updated)
         }
     }
 
@@ -231,6 +262,14 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _searchQuery.value = query
     }
 
+    fun setSortOrder(sort: LibrarySort) {
+        _sortOrder.value = sort
+    }
+
+    fun setFilterMode(filter: LibraryFilter) {
+        _filterMode.value = filter
+    }
+
     fun playTracks(trackList: List<AudioTrack>, startIndex: Int = 0, shuffle: Boolean = false) {
         val controller = mediaController ?: return
         if (trackList.isEmpty()) return
@@ -260,6 +299,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         controller.addMediaItem(insertIndex, track.toMediaItem())
         syncFromController()
         showBanner("Queued \"${track.title}\" to play next")
+    }
+
+    fun queueBatchNext(selectedTracks: List<AudioTrack>) {
+        if (selectedTracks.isEmpty()) return
+        val controller = mediaController ?: return
+        if (controller.mediaItemCount == 0) {
+            playTracks(selectedTracks, 0, false)
+            showBanner("Playing ${selectedTracks.size} tracks")
+            return
+        }
+        val insertIndex = (controller.currentMediaItemIndex + 1).coerceAtMost(controller.mediaItemCount)
+        controller.addMediaItems(insertIndex, selectedTracks.map { it.toMediaItem() })
+        syncFromController()
+        showBanner("Queued ${selectedTracks.size} tracks next")
     }
 
     fun jumpToQueueIndex(index: Int) {
@@ -319,8 +372,15 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
 
     fun seekTo(positionMs: Long) {
         val controller = mediaController ?: return
-        controller.seekTo(positionMs.coerceAtLeast(0L))
-        _playbackState.update { it.copy(positionMs = positionMs.coerceAtLeast(0L)) }
+        val maxDur = _playbackState.value.durationMs.takeIf { it > 0L } ?: Long.MAX_VALUE
+        val target = positionMs.coerceIn(0L, maxDur)
+        controller.seekTo(target)
+        _playbackState.update { it.copy(positionMs = target) }
+    }
+
+    fun nudgePosition(deltaMs: Long) {
+        val current = _playbackState.value.positionMs
+        seekTo(current + deltaMs)
     }
 
     fun toggleShuffle() {
@@ -348,6 +408,25 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         store.saveLikedIds(updated)
     }
 
+    fun updateTrackMetadata(trackId: String, newTitle: String, newArtist: String, newAlbum: String) {
+        val cleanTitle = newTitle.trim()
+        if (cleanTitle.isEmpty()) return
+        val cleanArtist = newArtist.trim().ifBlank { "Unknown Artist" }
+        val cleanAlbum = newAlbum.trim().ifBlank { "Local Studio" }
+
+        val updated = _tracks.value.map { t ->
+            if (t.id == trackId) {
+                t.copy(title = cleanTitle, artist = cleanArtist, album = cleanAlbum)
+            } else {
+                t
+            }
+        }
+        _tracks.value = updated
+        store.saveTracks(updated)
+        syncFromController()
+        showBanner("Updated track info")
+    }
+
     fun removeTrackFromLibrary(track: AudioTrack) {
         val updatedTracks = _tracks.value.filterNot { it.id == track.id }
         _tracks.value = updatedTracks
@@ -363,7 +442,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _playlists.value = updatedPlaylists
         store.savePlaylists(updatedPlaylists)
 
-        // Purge removed track from active playback queue as well
         mediaController?.let { controller ->
             for (i in controller.mediaItemCount - 1 downTo 0) {
                 if (controller.getMediaItemAt(i).mediaId == track.id) {
@@ -373,7 +451,12 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             syncFromController()
         }
 
+        // Delete cached artwork and internal received audio file if owned by the app
         track.artworkPath?.let { path -> runCatching { File(path).delete() } }
+        val uri = Uri.parse(track.uriString)
+        if (uri.scheme == "file" && uri.path?.contains("received_music") == true) {
+            runCatching { File(uri.path!!).delete() }
+        }
         showBanner("Removed \"${track.title}\"")
     }
 
@@ -437,6 +520,47 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         store.savePlaylists(updated)
     }
 
+    // StudioBeam (ASP1) Controls
+    fun setBeamRequirePin(requirePin: Boolean) = beamEngine.setRequirePin(requirePin)
+
+    fun startBeamSend(selectedIds: Set<String>) {
+        val toSend = _tracks.value.filter { selectedIds.contains(it.id) }
+        beamEngine.startSending(toSend)
+    }
+
+    fun startBeamScanning() = beamEngine.startScanningForPeers()
+    fun stopBeamScanning() = beamEngine.stopScanning()
+    fun stopBeamSession() = beamEngine.stopAll()
+
+    fun connectBeamPeer(peer: DiscoveredBeamPeer, pin: String) {
+        beamEngine.receiveFromPeer(
+            hostIp = peer.hostIp,
+            port = peer.port,
+            pin = pin,
+            expectedTotalBytes = peer.totalBytes
+        ) { receivedTrack ->
+            addReceivedTrackToLibrary(receivedTrack)
+        }
+    }
+
+    fun connectBeamManual(codeOrAddress: String, pin: String): Boolean {
+        val decoded = BeamCodeCodec.decode(codeOrAddress) ?: return false
+        beamEngine.receiveFromPeer(
+            hostIp = decoded.first,
+            port = decoded.second,
+            pin = pin
+        ) { receivedTrack ->
+            addReceivedTrackToLibrary(receivedTrack)
+        }
+        return true
+    }
+
+    private fun addReceivedTrackToLibrary(track: AudioTrack) {
+        val updated = listOf(track) + _tracks.value
+        _tracks.value = updated
+        store.saveTracks(updated)
+    }
+
     // DSP Controls forwarding cleanly to PlaybackService bridge
     fun setEqEnabled(enabled: Boolean) = StudioEngineBridge.setEqEnabled(enabled)
     fun applyEqPreset(preset: EqPreset) = StudioEngineBridge.applyPreset(preset)
@@ -463,7 +587,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     fun toggleAbLoop(enabled: Boolean) = StudioEngineBridge.toggleAbLoop(enabled)
     fun clearAbLoop() = StudioEngineBridge.clearAbLoop()
 
-    private fun showBanner(message: String) {
+    fun showBanner(message: String) {
         _statusBanner.value = message
         viewModelScope.launch {
             delay(2400L)
@@ -474,6 +598,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        beamEngine.stopAll()
         mediaController?.removeListener(controllerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         super.onCleared()
