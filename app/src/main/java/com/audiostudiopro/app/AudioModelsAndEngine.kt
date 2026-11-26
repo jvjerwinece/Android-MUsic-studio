@@ -1,3 +1,5 @@
+@file:OptIn(UnstableApi::class)
+
 package com.audiostudiopro.app
 
 import android.content.Context
@@ -8,12 +10,20 @@ import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.media.audiofx.BassBoost
 import android.media.audiofx.Equalizer
+import android.media.audiofx.LoudnessEnhancer
+import android.media.audiofx.PresetReverb
+import android.media.audiofx.Virtualizer
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.LruCache
 import androidx.compose.ui.graphics.Color
+import androidx.media3.common.AuxEffectInfo
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.audio.AudioProcessor
+import androidx.media3.common.audio.BaseAudioProcessor
+import androidx.media3.common.util.UnstableApi
 import androidx.palette.graphics.Palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +35,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -65,7 +76,7 @@ data class AudioTrack(
             if (bitrateKbps > 0) {
                 parts.add("${bitrateKbps} kbps")
             }
-            return if (parts.isEmpty()) "LOCAL STUDIO" else parts.joinToString(" • ")
+            return if (parts.isEmpty()) "LOCAL AUDIO" else parts.joinToString(" • ")
         }
 
     fun toMediaItem(): MediaItem {
@@ -96,16 +107,24 @@ data class UserPlaylist(
     val createdAt: Long = System.currentTimeMillis()
 )
 
+data class CustomEqPreset(
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val bandGainsDb: List<Float>,
+    val bassStrength: Int
+)
+
 enum class LibrarySort(val label: String) {
-    RECENT("Newest"),
+    RECENT("Recently Added"),
     TITLE("Title A–Z"),
     ARTIST("Artist"),
-    DURATION("Length"),
+    DURATION("Duration"),
     MOST_PLAYED("Most Played")
 }
 
 enum class LibraryFilter(val label: String) {
-    ALL("All Tracks"),
+    ALL("All"),
+    FAVORITES("Liked"),
     LOSSLESS("Lossless"),
     RECENTLY_PLAYED("Recent")
 }
@@ -117,12 +136,12 @@ data class AmbientPalette(
 ) {
     companion object {
         private val curatedFallbacks = listOf(
-            AmbientPalette(Color(0xFF4F46E5), Color(0xFF1E1B4B), Color(0xFF818CF8)),
-            AmbientPalette(Color(0xFF0EA5E9), Color(0xFF0C4A6E), Color(0xFF38BDF8)),
-            AmbientPalette(Color(0xFFE11D48), Color(0xFF4C0519), Color(0xFFFB7185)),
-            AmbientPalette(Color(0xFFD97706), Color(0xFF451A03), Color(0xFFFBBF24)),
-            AmbientPalette(Color(0xFF10B981), Color(0xFF064E3B), Color(0xFF34D399)),
-            AmbientPalette(Color(0xFF9333EA), Color(0xFF3B0764), Color(0xFFC084FC))
+            AmbientPalette(Color(0xFF2E5C45), Color(0xFF13261D), Color(0xFF1ED760)),
+            AmbientPalette(Color(0xFF31447B), Color(0xFF141B33), Color(0xFF60A5FA)),
+            AmbientPalette(Color(0xFF7B2D3E), Color(0xFF2D1017), Color(0xFFFB7185)),
+            AmbientPalette(Color(0xFF784E1D), Color(0xFF291A09), Color(0xFFFBBF24)),
+            AmbientPalette(Color(0xFF4F3478), Color(0xFF1C122D), Color(0xFFC084FC)),
+            AmbientPalette(Color(0xFF1F5D6B), Color(0xFF0C242B), Color(0xFF2DD4BF))
         )
 
         val Default = curatedFallbacks.first()
@@ -144,6 +163,14 @@ enum class EqPreset(val label: String, val bandsDb: List<Float>, val bassStrengt
     CUSTOM("Custom", listOf(0f, 0f, 0f, 0f, 0f), 0)
 }
 
+enum class ReverbPreset(val label: String, val androidPreset: Short) {
+    OFF("Off", PresetReverb.PRESET_NONE),
+    SMALL_ROOM("Small Room", PresetReverb.PRESET_SMALLROOM),
+    MEDIUM_HALL("Medium Hall", PresetReverb.PRESET_MEDIUMHALL),
+    LARGE_HALL("Large Hall", PresetReverb.PRESET_LARGEHALL),
+    PLATE("Studio Plate", PresetReverb.PRESET_PLATE)
+}
+
 data class AbLoopState(
     val trackId: String? = null,
     val pointAMs: Long? = null,
@@ -157,11 +184,18 @@ data class AbLoopState(
 data class DspState(
     val eqEnabled: Boolean = false,
     val activePreset: EqPreset = EqPreset.FLAT,
+    val activeCustomPresetId: String? = null,
     val bandGainsDb: List<Float> = listOf(0f, 0f, 0f, 0f, 0f),
-    val bassBoostStrength: Int = 0,
-    val speed: Float = 1.0f,
-    val pitch: Float = 1.0f,
-    val crossfadeSeconds: Int = 0,
+    val bassBoostStrength: Int = 0, // 0..1000
+    val preampGainDb: Float = 0f, // 0f..10f dB (LoudnessEnhancer)
+    val virtualizerStrength: Int = 0, // 0..1000 (3D Soundstage)
+    val stereoBalance: Float = 0f, // -1f (L) .. 0f (Center) .. +1f (R)
+    val monoMix: Boolean = false,
+    val reverbPreset: ReverbPreset = ReverbPreset.OFF,
+    val speed: Float = 1.0f, // 0.50f..2.00f
+    val pitch: Float = 1.0f, // 0.50f..2.00f
+    val skipSilence: Boolean = false,
+    val crossfadeSeconds: Int = 0, // 0 = True Gapless, 1..8 = Soft Auto-Fade
     val abLoop: AbLoopState = AbLoopState(),
     val sleepTimerSelectedMinutes: Int = 0,
     val sleepTimerEndEpochMs: Long? = null,
@@ -169,8 +203,14 @@ data class DspState(
 ) {
     val hasActiveProcessing: Boolean
         get() = eqEnabled ||
+            preampGainDb > 0.1f ||
+            virtualizerStrength > 0 ||
+            abs(stereoBalance) > 0.02f ||
+            monoMix ||
+            reverbPreset != ReverbPreset.OFF ||
             abs(speed - 1.0f) > 0.01f ||
             abs(pitch - 1.0f) > 0.01f ||
+            skipSilence ||
             crossfadeSeconds > 0 ||
             abLoop.enabled ||
             sleepTimerEndEpochMs != null
@@ -178,8 +218,8 @@ data class DspState(
 
 /**
  * Process-wide reactive bridge shared between PlaybackService and MusicViewModel.
- * Ensures all DSP, Looper, Sleep Timer, and Crossfade controls continue executing
- * cleanly in the foreground service even when the user swipes the UI away from Recents.
+ * Ensures all DSP, PCM Balance/Mono, Reverb, Looper, Sleep Timer, and Crossfade controls
+ * continue executing cleanly in the foreground service even when the UI is swiped away.
  */
 object StudioEngineBridge {
     val bandLabels = listOf("60Hz", "230Hz", "910Hz", "3.6kHz", "14kHz")
@@ -192,8 +232,21 @@ object StudioEngineBridge {
             current.copy(
                 eqEnabled = true,
                 activePreset = preset,
+                activeCustomPresetId = null,
                 bandGainsDb = preset.bandsDb,
                 bassBoostStrength = preset.bassStrength
+            )
+        }
+    }
+
+    fun applyCustomPreset(preset: CustomEqPreset) {
+        _dspState.update { current ->
+            current.copy(
+                eqEnabled = true,
+                activePreset = EqPreset.CUSTOM,
+                activeCustomPresetId = preset.id,
+                bandGainsDb = preset.bandGainsDb.take(5).let { if (it.size == 5) it else listOf(0f, 0f, 0f, 0f, 0f) },
+                bassBoostStrength = preset.bassStrength.coerceIn(0, 1000)
             )
         }
     }
@@ -207,6 +260,7 @@ object StudioEngineBridge {
             current.copy(
                 eqEnabled = true,
                 activePreset = EqPreset.CUSTOM,
+                activeCustomPresetId = null,
                 bandGainsDb = updated
             )
         }
@@ -217,6 +271,7 @@ object StudioEngineBridge {
             current.copy(
                 eqEnabled = true,
                 activePreset = EqPreset.CUSTOM,
+                activeCustomPresetId = null,
                 bassBoostStrength = strength.coerceIn(0, 1000)
             )
         }
@@ -224,6 +279,27 @@ object StudioEngineBridge {
 
     fun setEqEnabled(enabled: Boolean) {
         _dspState.update { it.copy(eqEnabled = enabled) }
+    }
+
+    fun setPreampGainDb(gainDb: Float) {
+        _dspState.update { it.copy(preampGainDb = gainDb.coerceIn(0f, 10f)) }
+    }
+
+    fun setVirtualizerStrength(strength: Int) {
+        _dspState.update { it.copy(virtualizerStrength = strength.coerceIn(0, 1000)) }
+    }
+
+    fun setStereoBalance(balance: Float) {
+        val snapped = if (abs(balance) < 0.04f) 0f else balance.coerceIn(-1f, 1f)
+        _dspState.update { it.copy(stereoBalance = snapped) }
+    }
+
+    fun setMonoMix(enabled: Boolean) {
+        _dspState.update { it.copy(monoMix = enabled) }
+    }
+
+    fun setReverbPreset(preset: ReverbPreset) {
+        _dspState.update { it.copy(reverbPreset = preset) }
     }
 
     fun setSpeed(speed: Float) {
@@ -234,8 +310,24 @@ object StudioEngineBridge {
         _dspState.update { it.copy(pitch = pitch.coerceIn(0.50f, 2.00f)) }
     }
 
+    fun setSkipSilence(enabled: Boolean) {
+        _dspState.update { it.copy(skipSilence = enabled) }
+    }
+
     fun resetTempoPitch() {
-        _dspState.update { it.copy(speed = 1.0f, pitch = 1.0f) }
+        _dspState.update { it.copy(speed = 1.0f, pitch = 1.0f, skipSilence = false) }
+    }
+
+    fun resetStageAndRoom() {
+        _dspState.update {
+            it.copy(
+                preampGainDb = 0f,
+                virtualizerStrength = 0,
+                stereoBalance = 0f,
+                monoMix = false,
+                reverbPreset = ReverbPreset.OFF
+            )
+        }
     }
 
     fun setCrossfadeSeconds(seconds: Int) {
@@ -323,22 +415,115 @@ object StudioEngineBridge {
 }
 
 /**
- * Hardware 5-Band Graphic Equalizer + BassBoost attached to ExoPlayer's audioSessionId.
- * Gracefully adapts to any Android OEM's hardware band count and millibel ceiling.
+ * Real-time PCM Stereo Balance & Mono-Mix AudioProcessor for AndroidX Media3 ExoPlayer.
+ * Works consistently across every Android device on both 16-bit PCM and Float PCM streams.
+ */
+class StereoBalanceAudioProcessor : BaseAudioProcessor() {
+
+    @Volatile
+    var balance: Float = 0f
+
+    @Volatile
+    var monoMix: Boolean = false
+
+    override fun onConfigure(inputAudioFormat: AudioProcessor.AudioFormat): AudioProcessor.AudioFormat {
+        val supportedEncoding = inputAudioFormat.encoding == C.ENCODING_PCM_16BIT ||
+            inputAudioFormat.encoding == C.ENCODING_PCM_FLOAT
+        return if (inputAudioFormat.channelCount == 2 && supportedEncoding) {
+            inputAudioFormat
+        } else {
+            AudioProcessor.AudioFormat.NOT_SET
+        }
+    }
+
+    override fun queueInput(inputBuffer: ByteBuffer) {
+        val pos = inputBuffer.position()
+        val limit = inputBuffer.limit()
+        val remaining = limit - pos
+        if (remaining <= 0) return
+
+        val bal = balance.coerceIn(-1f, 1f)
+        val mono = monoMix
+
+        // Zero-overhead pass-through when centered and stereo
+        if (!mono && abs(bal) < 0.005f) {
+            val out = replaceOutputBuffer(remaining)
+            out.put(inputBuffer)
+            out.flip()
+            return
+        }
+
+        val frameBytes = if (inputAudioFormat.encoding == C.ENCODING_PCM_FLOAT) 8 else 4
+        val processableBytes = (remaining / frameBytes) * frameBytes
+        if (processableBytes <= 0) return
+
+        val end = pos + processableBytes
+        val out = replaceOutputBuffer(processableBytes)
+        val leftGain = if (bal > 0f) (1f - bal).coerceIn(0f, 1f) else 1f
+        val rightGain = if (bal < 0f) (1f + bal).coerceIn(0f, 1f) else 1f
+
+        when (inputAudioFormat.encoding) {
+            C.ENCODING_PCM_16BIT -> {
+                var i = pos
+                while (i < end) {
+                    val lRaw = inputBuffer.getShort(i).toFloat()
+                    val rRaw = inputBuffer.getShort(i + 2).toFloat()
+                    val baseL = if (mono) (lRaw + rRaw) * 0.5f else lRaw
+                    val baseR = if (mono) baseL else rRaw
+                    val outL = (baseL * leftGain).roundToInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                    val outR = (baseR * rightGain).roundToInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                    out.putShort(outL)
+                    out.putShort(outR)
+                    i += 4
+                }
+            }
+
+            C.ENCODING_PCM_FLOAT -> {
+                var i = pos
+                while (i < end) {
+                    val lRaw = inputBuffer.getFloat(i)
+                    val rRaw = inputBuffer.getFloat(i + 4)
+                    val baseL = if (mono) (lRaw + rRaw) * 0.5f else lRaw
+                    val baseR = if (mono) baseL else rRaw
+                    out.putFloat((baseL * leftGain).coerceIn(-1f, 1f))
+                    out.putFloat((baseR * rightGain).coerceIn(-1f, 1f))
+                    i += 8
+                }
+            }
+
+            else -> {
+                out.put(inputBuffer)
+            }
+        }
+
+        inputBuffer.position(end)
+        out.flip()
+    }
+}
+
+/**
+ * Hardware DSP Rack attached to ExoPlayer's audioSessionId:
+ * - 5-Band Graphic Equalizer (-12dB..+12dB)
+ * - Hardware Bass Boost (0..1000)
+ * - Clean Loudness Preamp Gain (0..+10dB via LoudnessEnhancer)
+ * - 3D Soundstage Virtualizer (0..1000)
+ * - Opt-in Auxiliary Room Reverb (PresetReverb on session 0 + AuxEffectInfo)
  */
 class HardwareDspController {
     private var attachedSessionId: Int = 0
     private var equalizer: Equalizer? = null
     private var bassBoost: BassBoost? = null
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var virtualizer: Virtualizer? = null
+    private var presetReverb: PresetReverb? = null
 
-    fun attachToSession(audioSessionId: Int, currentState: DspState) {
-        if (audioSessionId <= 0) return
+    fun attachToSession(audioSessionId: Int, currentState: DspState): AuxEffectInfo? {
+        if (audioSessionId <= 0) return null
         if (audioSessionId == attachedSessionId && equalizer != null) {
-            applyState(currentState)
-            return
+            return applyState(currentState)
         }
 
-        release()
+        releaseSessionEffects()
         attachedSessionId = audioSessionId
 
         runCatching {
@@ -353,10 +538,22 @@ class HardwareDspController {
             }
         }
 
-        applyState(currentState)
+        runCatching {
+            loudnessEnhancer = LoudnessEnhancer(audioSessionId).apply {
+                enabled = currentState.preampGainDb > 0.1f
+            }
+        }
+
+        runCatching {
+            virtualizer = Virtualizer(0, audioSessionId).apply {
+                enabled = currentState.virtualizerStrength > 0
+            }
+        }
+
+        return applyState(currentState)
     }
 
-    fun applyState(state: DspState) {
+    fun applyState(state: DspState): AuxEffectInfo? {
         equalizer?.let { eq ->
             runCatching {
                 eq.enabled = state.eqEnabled
@@ -391,14 +588,58 @@ class HardwareDspController {
                 }
             }
         }
+
+        loudnessEnhancer?.let { le ->
+            runCatching {
+                val targetMb = (state.preampGainDb * 100f).roundToInt().coerceIn(0, 1000)
+                le.setTargetGain(targetMb)
+                le.enabled = targetMb > 0
+            }
+        }
+
+        virtualizer?.let { virt ->
+            runCatching {
+                val strength = state.virtualizerStrength.coerceIn(0, 1000)
+                virt.enabled = strength > 0
+                if (virt.strengthSupported) {
+                    virt.setStrength(strength.toShort())
+                }
+            }
+        }
+
+        // Opt-in Auxiliary Room Reverb (created lazily on session 0 per Android AudioFX spec)
+        return if (state.reverbPreset == ReverbPreset.OFF) {
+            runCatching {
+                presetReverb?.enabled = false
+                presetReverb?.preset = PresetReverb.PRESET_NONE
+            }
+            null
+        } else {
+            runCatching {
+                val rev = presetReverb ?: PresetReverb(0, 0).also { presetReverb = it }
+                rev.preset = state.reverbPreset.androidPreset
+                rev.enabled = true
+                AuxEffectInfo(rev.id, 0.55f)
+            }.getOrNull()
+        }
+    }
+
+    private fun releaseSessionEffects() {
+        runCatching { equalizer?.release() }
+        runCatching { bassBoost?.release() }
+        runCatching { loudnessEnhancer?.release() }
+        runCatching { virtualizer?.release() }
+        equalizer = null
+        bassBoost = null
+        loudnessEnhancer = null
+        virtualizer = null
+        attachedSessionId = 0
     }
 
     fun release() {
-        runCatching { equalizer?.release() }
-        runCatching { bassBoost?.release() }
-        equalizer = null
-        bassBoost = null
-        attachedSessionId = 0
+        releaseSessionEffects()
+        runCatching { presetReverb?.release() }
+        presetReverb = null
     }
 }
 
@@ -439,12 +680,12 @@ object ArtworkCache {
             val fallback = AmbientPalette.fallbackFor(track.id)
 
             val primaryInt = palette.getVibrantColor(
-                palette.getLightVibrantColor(
-                    palette.getMutedColor(0)
+                palette.getMutedColor(
+                    palette.getDarkVibrantColor(0)
                 )
             )
-            val secondaryInt = palette.getDarkVibrantColor(
-                palette.getDarkMutedColor(0)
+            val secondaryInt = palette.getDarkMutedColor(
+                palette.getDarkVibrantColor(0)
             )
             val accentInt = palette.getLightVibrantColor(
                 palette.getVibrantColor(0)
@@ -478,7 +719,7 @@ object MetadataExtractor {
 
         var title = fallbackName
         var artist = "Unknown Artist"
-        var album = "Local Studio"
+        var album = "Local Library"
         var durationMs = 0L
         var bitrateKbps = 0
         var sampleRateHz = 0
@@ -506,7 +747,6 @@ object MetadataExtractor {
         }
         runCatching { retriever.release() }
 
-        // Probe codec & sample rate cleanly via MediaExtractor header read
         val extractor = MediaExtractor()
         runCatching {
             extractor.setDataSource(context, uri, null)
@@ -631,7 +871,7 @@ class LocalLibraryStore(context: Context) {
                             uriString = o.getString("uri"),
                             title = o.getString("title"),
                             artist = o.getString("artist"),
-                            album = o.optString("album", "Local Studio"),
+                            album = o.optString("album", "Local Library"),
                             durationMs = o.optLong("durationMs", 0L),
                             artworkPath = o.optString("artworkPath", "").ifBlank { null },
                             dateAdded = o.optLong("dateAdded", 0L),
@@ -710,6 +950,45 @@ class LocalLibraryStore(context: Context) {
         prefs.edit().putString(KEY_PLAYLISTS, arr.toString()).apply()
     }
 
+    fun loadCustomEqPresets(): List<CustomEqPreset> {
+        val raw = prefs.getString(KEY_CUSTOM_EQ_PRESETS, null) ?: return emptyList()
+        return runCatching {
+            val arr = JSONArray(raw)
+            buildList(arr.length()) {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    val bArr = o.optJSONArray("bands") ?: JSONArray()
+                    val bands = buildList(5) {
+                        for (j in 0 until 5) add(bArr.optDouble(j, 0.0).toFloat())
+                    }
+                    add(
+                        CustomEqPreset(
+                            id = o.getString("id"),
+                            name = o.getString("name"),
+                            bandGainsDb = bands,
+                            bassStrength = o.optInt("bass", 0)
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    fun saveCustomEqPresets(presets: List<CustomEqPreset>) {
+        val arr = JSONArray()
+        presets.forEach { p ->
+            arr.put(
+                JSONObject().apply {
+                    put("id", p.id)
+                    put("name", p.name)
+                    put("bass", p.bassStrength)
+                    put("bands", JSONArray(p.bandGainsDb.map { it.toDouble() }))
+                }
+            )
+        }
+        prefs.edit().putString(KEY_CUSTOM_EQ_PRESETS, arr.toString()).apply()
+    }
+
     fun loadLikedIds(): Set<String> {
         return prefs.getStringSet(KEY_LIKED_IDS, emptySet())?.toSet() ?: emptySet()
     }
@@ -722,6 +1001,7 @@ class LocalLibraryStore(context: Context) {
         private const val KEY_TRACKS = "tracks_json"
         private const val KEY_PLAYLISTS = "playlists_json"
         private const val KEY_LIKED_IDS = "liked_ids_set"
+        private const val KEY_CUSTOM_EQ_PRESETS = "custom_eq_presets_json"
     }
 }
 

@@ -41,20 +41,7 @@ import kotlin.random.Random
 
 /**
  * StudioBeam (ASP1 - AudioStudio Protocol v1)
- *
- * A custom, high-speed, zero-permission binary framing transfer protocol designed for
- * multi-song local Wi-Fi & Mobile Hotspot sharing between two AudioStudio Pro devices.
- *
- * Wire Format (TCP):
- *   1. Handshake (Receiver -> Sender): 4B "HELO" + UTF(pin)
- *   2. Gate (Sender -> Receiver):      4B "ASP1" (accepted) or "DENY" (wrong PIN)
- *   3. Batch Header:                   1B version(1) + UTF(deviceName) + 4B trackCount
- *   4. Per Track Frame:                4B metaLen + UTF-8 JSON meta + 8B payloadLen + raw audio bytes (64KB chunks)
- *   5. Completion ACK (Receiver->Snd): 4B "OKAY"
- *
- * Discovery:
- *   - UDP Broadcast Beacon on Port 47821 for automatic nearby radar detection
- *   - Compact Base36 Beam Code (encodes IPv4 + TCP Port) for isolated campus Wi-Fi fallback
+ * High-speed, zero-permission binary framing transfer protocol over local Wi-Fi / Hotspot.
  */
 
 enum class BeamMode { IDLE, SENDING, RECEIVING, COMPLETED, ERROR }
@@ -97,9 +84,6 @@ data class StudioBeamUiState(
 }
 
 object BeamCodeCodec {
-    /**
-     * Packs IPv4 (32 bits) + TCP Port (16 bits) into a compact 10-char Base36 code (XXXXX-XXXXX).
-     */
     fun encode(ipv4: String, port: Int): String {
         val parts = ipv4.split(".")
         if (parts.size != 4) return "$ipv4:$port"
@@ -113,14 +97,10 @@ object BeamCodeCodec {
         return "${raw.substring(0, 5)}-${raw.substring(5, 10)}"
     }
 
-    /**
-     * Accepts either a StudioBeam Code ("K4P9X-2M7Q1") or a raw "192.168.43.1:47822" / "192.168.43.1".
-     */
     fun decode(input: String, defaultPort: Int = StudioBeamEngine.DEFAULT_TCP_PORT): Pair<String, Int>? {
         val trimmed = input.trim()
         if (trimmed.isEmpty()) return null
 
-        // Direct IPv4 or IPv4:Port support
         if (trimmed.contains(".")) {
             val hostPart = trimmed.substringBefore(":").trim()
             val portPart = if (trimmed.contains(":")) {
@@ -135,7 +115,6 @@ object BeamCodeCodec {
             return null
         }
 
-        // Base36 Beam Code decode
         val clean = trimmed.replace("-", "").replace(" ", "").uppercase(Locale.US)
         val packed = clean.toLongOrNull(36) ?: return null
         val port = (packed and 0xFFFFL).toInt()
@@ -221,7 +200,6 @@ class StudioBeamEngine(
                     )
                 }
 
-                // Launch UDP discovery beacon so nearby receivers see this device automatically
                 beaconJob = launch(Dispatchers.IO) {
                     DatagramSocket().use { udp ->
                         udp.broadcast = true
@@ -256,7 +234,6 @@ class StudioBeamEngine(
                     }
                 }
 
-                // Accept connections cleanly until session stopped
                 while (isActive && !server.isClosed) {
                     val client = try {
                         server.accept()
@@ -291,7 +268,6 @@ class StudioBeamEngine(
             val dis = DataInputStream(BufferedInputStream(socket.getInputStream()))
             val dos = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), BUFFER_SIZE))
 
-            // 1. Handshake
             val heloBytes = ByteArray(4)
             dis.readFully(heloBytes)
             if (String(heloBytes, Charsets.US_ASCII) != "HELO") return
@@ -304,7 +280,6 @@ class StudioBeamEngine(
                 return
             }
 
-            // 2. Accept & send ASP1 Batch Header
             dos.write("ASP1".toByteArray(Charsets.US_ASCII))
             dos.writeByte(1)
             dos.writeUTF(deviceName)
@@ -374,7 +349,6 @@ class StudioBeamEngine(
                 }
             }
 
-            // Wait for receiver ACK so the socket doesn't truncate trailing TCP buffers
             runCatching {
                 val ack = ByteArray(4)
                 dis.readFully(ack)
@@ -505,12 +479,10 @@ class StudioBeamEngine(
                     val dos = DataOutputStream(BufferedOutputStream(socket.getOutputStream()))
                     val dis = DataInputStream(BufferedInputStream(socket.getInputStream(), BUFFER_SIZE))
 
-                    // 1. Send HELO + PIN
                     dos.write("HELO".toByteArray(Charsets.US_ASCII))
                     dos.writeUTF(pin.trim())
                     dos.flush()
 
-                    // 2. Read Gate
                     val gate = ByteArray(4)
                     dis.readFully(gate)
                     val gateStr = String(gate, Charsets.US_ASCII)
@@ -618,7 +590,6 @@ class StudioBeamEngine(
                         }
                     }
 
-                    // Send completion ACK
                     dos.write("OKAY".toByteArray(Charsets.US_ASCII))
                     dos.flush()
 
@@ -691,7 +662,6 @@ class StudioBeamEngine(
             return PreparedStream(input, afdSize, ext, null)
         }
 
-        // Reliable fallback: copy into cache temp file so exact byte length is guaranteed
         val temp = File.createTempFile("beam_", ".$ext", context.cacheDir)
         context.contentResolver.openInputStream(uri)?.use { input ->
             FileOutputStream(temp).use { output -> input.copyTo(output, BUFFER_SIZE) }

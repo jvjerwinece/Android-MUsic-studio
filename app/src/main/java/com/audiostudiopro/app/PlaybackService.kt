@@ -3,14 +3,19 @@
 package com.audiostudiopro.app
 
 import android.app.PendingIntent
+import android.content.Context
 import android.content.Intent
 import androidx.media3.common.AudioAttributes
+import androidx.media3.common.AuxEffectInfo
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import kotlinx.coroutines.CoroutineScope
@@ -27,18 +32,23 @@ class PlaybackService : MediaSessionService() {
     private var mediaSession: MediaSession? = null
     private lateinit var exoPlayer: ExoPlayer
     private val dspController = HardwareDspController()
+    private val stereoProcessor = StereoBalanceAudioProcessor()
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
-    private data class HardwareEqSnapshot(
+    private data class HardwareDspSnapshot(
         val eqEnabled: Boolean,
         val bandGainsDb: List<Float>,
-        val bassBoostStrength: Int
+        val bassBoostStrength: Int,
+        val preampGainDb: Float,
+        val virtualizerStrength: Int,
+        val reverbPreset: ReverbPreset
     )
 
     private val playerListener = object : Player.Listener {
         override fun onAudioSessionIdChanged(audioSessionId: Int) {
             if (audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
-                dspController.attachToSession(audioSessionId, StudioEngineBridge.dspState.value)
+                val aux = dspController.attachToSession(audioSessionId, StudioEngineBridge.dspState.value)
+                syncReverbAuxEffect(aux)
             }
         }
 
@@ -53,7 +63,8 @@ class PlaybackService : MediaSessionService() {
             if (isPlaying) {
                 val sid = exoPlayer.audioSessionId
                 if (sid != C.AUDIO_SESSION_ID_UNSET) {
-                    dspController.attachToSession(sid, StudioEngineBridge.dspState.value)
+                    val aux = dspController.attachToSession(sid, StudioEngineBridge.dspState.value)
+                    syncReverbAuxEffect(aux)
                 }
             } else {
                 if (exoPlayer.volume < 0.99f) {
@@ -71,7 +82,21 @@ class PlaybackService : MediaSessionService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        exoPlayer = ExoPlayer.Builder(this)
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): AudioSink {
+                return DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(arrayOf(stereoProcessor))
+                    .build()
+            }
+        }
+
+        exoPlayer = ExoPlayer.Builder(this, renderersFactory)
             .setAudioAttributes(audioAttributes, /* handleAudioFocus = */ true)
             .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_LOCAL)
@@ -80,10 +105,11 @@ class PlaybackService : MediaSessionService() {
         exoPlayer.addListener(playerListener)
 
         if (exoPlayer.audioSessionId != C.AUDIO_SESSION_ID_UNSET) {
-            dspController.attachToSession(
+            val aux = dspController.attachToSession(
                 exoPlayer.audioSessionId,
                 StudioEngineBridge.dspState.value
             )
+            syncReverbAuxEffect(aux)
         }
 
         val launchIntent = Intent(this, MainActivity::class.java).apply {
@@ -104,29 +130,53 @@ class PlaybackService : MediaSessionService() {
         startRealtimeAudioEngineLoop()
     }
 
+    private fun syncReverbAuxEffect(auxEffectInfo: AuxEffectInfo?) {
+        runCatching {
+            if (auxEffectInfo != null) {
+                exoPlayer.setAuxEffectInfo(auxEffectInfo)
+            } else {
+                exoPlayer.clearAuxEffectInfo()
+            }
+        }
+    }
+
     private fun observeDspState() {
         serviceScope.launch {
-            var lastEqSnapshot: HardwareEqSnapshot? = null
+            var lastSnapshot: HardwareDspSnapshot? = null
             StudioEngineBridge.dspState.collect { state ->
-                val eqSnapshot = HardwareEqSnapshot(
+                // 1. Real-time PCM Stereo Balance & Mono Mix (lock-free volatile update)
+                stereoProcessor.balance = state.stereoBalance
+                stereoProcessor.monoMix = state.monoMix
+
+                // 2. Hardware AudioFX Rack (only dispatch IPC when values actually change)
+                val snapshot = HardwareDspSnapshot(
                     eqEnabled = state.eqEnabled,
                     bandGainsDb = state.bandGainsDb,
-                    bassBoostStrength = state.bassBoostStrength
+                    bassBoostStrength = state.bassBoostStrength,
+                    preampGainDb = state.preampGainDb,
+                    virtualizerStrength = state.virtualizerStrength,
+                    reverbPreset = state.reverbPreset
                 )
-
-                if (eqSnapshot != lastEqSnapshot) {
-                    lastEqSnapshot = eqSnapshot
+                if (snapshot != lastSnapshot) {
+                    lastSnapshot = snapshot
                     val sid = exoPlayer.audioSessionId
-                    if (sid != C.AUDIO_SESSION_ID_UNSET) {
+                    val aux = if (sid != C.AUDIO_SESSION_ID_UNSET) {
                         dspController.attachToSession(sid, state)
                     } else {
                         dspController.applyState(state)
                     }
+                    syncReverbAuxEffect(aux)
                 }
 
+                // 3. Varispeed Tempo & Independent Pitch
                 val currentParams = exoPlayer.playbackParameters
                 if (currentParams.speed != state.speed || currentParams.pitch != state.pitch) {
                     exoPlayer.playbackParameters = PlaybackParameters(state.speed, state.pitch)
+                }
+
+                // 4. Smart Silence Skipping
+                if (exoPlayer.skipSilenceEnabled != state.skipSilence) {
+                    exoPlayer.skipSilenceEnabled = state.skipSilence
                 }
             }
         }

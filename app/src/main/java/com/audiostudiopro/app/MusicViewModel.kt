@@ -48,6 +48,9 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     private val _playlists = MutableStateFlow<List<UserPlaylist>>(emptyList())
     val playlists: StateFlow<List<UserPlaylist>> = _playlists.asStateFlow()
 
+    private val _customEqPresets = MutableStateFlow<List<CustomEqPreset>>(emptyList())
+    val customEqPresets: StateFlow<List<CustomEqPreset>> = _customEqPresets.asStateFlow()
+
     private val _likedIds = MutableStateFlow<Set<String>>(emptySet())
     val likedIds: StateFlow<Set<String>> = _likedIds.asStateFlow()
 
@@ -109,6 +112,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         _tracks.value = store.loadTracks()
         _playlists.value = store.loadPlaylists()
         _likedIds.value = store.loadLikedIds()
+        _customEqPresets.value = store.loadCustomEqPresets()
 
         connectToPlaybackService()
         startProgressTicker()
@@ -170,7 +174,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
                     uriString = item.localConfiguration?.uri?.toString() ?: "",
                     title = item.mediaMetadata.title?.toString() ?: "Unknown Track",
                     artist = item.mediaMetadata.artist?.toString() ?: "Unknown Artist",
-                    album = item.mediaMetadata.albumTitle?.toString() ?: "Local Studio",
+                    album = item.mediaMetadata.albumTitle?.toString() ?: "Local Library",
                     durationMs = 0L
                 )
                 add(resolved)
@@ -298,7 +302,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val insertIndex = (controller.currentMediaItemIndex + 1).coerceAtMost(controller.mediaItemCount)
         controller.addMediaItem(insertIndex, track.toMediaItem())
         syncFromController()
-        showBanner("Queued \"${track.title}\" to play next")
+        showBanner("Queued \"${track.title}\" next")
     }
 
     fun queueBatchNext(selectedTracks: List<AudioTrack>) {
@@ -379,8 +383,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun nudgePosition(deltaMs: Long) {
-        val current = _playbackState.value.positionMs
-        seekTo(current + deltaMs)
+        seekTo(_playbackState.value.positionMs + deltaMs)
     }
 
     fun toggleShuffle() {
@@ -412,7 +415,7 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         val cleanTitle = newTitle.trim()
         if (cleanTitle.isEmpty()) return
         val cleanArtist = newArtist.trim().ifBlank { "Unknown Artist" }
-        val cleanAlbum = newAlbum.trim().ifBlank { "Local Studio" }
+        val cleanAlbum = newAlbum.trim().ifBlank { "Local Library" }
 
         val updated = _tracks.value.map { t ->
             if (t.id == trackId) {
@@ -451,7 +454,6 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
             syncFromController()
         }
 
-        // Delete cached artwork and internal received audio file if owned by the app
         track.artworkPath?.let { path -> runCatching { File(path).delete() } }
         val uri = Uri.parse(track.uriString)
         if (uri.scheme == "file" && uri.path?.contains("received_music") == true) {
@@ -520,6 +522,33 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         store.savePlaylists(updated)
     }
 
+    // Custom Saved EQ Presets
+    fun saveCurrentEqAsCustomPreset(name: String) {
+        val clean = name.trim()
+        if (clean.isEmpty()) return
+        val current = dspState.value
+        val preset = CustomEqPreset(
+            name = clean,
+            bandGainsDb = current.bandGainsDb.toList(),
+            bassStrength = current.bassBoostStrength
+        )
+        val updated = listOf(preset) + _customEqPresets.value
+        _customEqPresets.value = updated
+        store.saveCustomEqPresets(updated)
+        StudioEngineBridge.applyCustomPreset(preset)
+        showBanner("Saved EQ preset \"$clean\"")
+    }
+
+    fun applyCustomEqPreset(preset: CustomEqPreset) {
+        StudioEngineBridge.applyCustomPreset(preset)
+    }
+
+    fun deleteCustomEqPreset(presetId: String) {
+        val updated = _customEqPresets.value.filterNot { it.id == presetId }
+        _customEqPresets.value = updated
+        store.saveCustomEqPresets(updated)
+    }
+
     // StudioBeam (ASP1) Controls
     fun setBeamRequirePin(requirePin: Boolean) = beamEngine.setRequirePin(requirePin)
 
@@ -561,13 +590,20 @@ class MusicViewModel(application: Application) : AndroidViewModel(application) {
         store.saveTracks(updated)
     }
 
-    // DSP Controls forwarding cleanly to PlaybackService bridge
+    // DSP Controls
     fun setEqEnabled(enabled: Boolean) = StudioEngineBridge.setEqEnabled(enabled)
     fun applyEqPreset(preset: EqPreset) = StudioEngineBridge.applyPreset(preset)
     fun setEqBandGain(index: Int, gainDb: Float) = StudioEngineBridge.setBandGain(index, gainDb)
     fun setBassBoost(strength: Int) = StudioEngineBridge.setBassBoost(strength)
+    fun setPreampGainDb(gainDb: Float) = StudioEngineBridge.setPreampGainDb(gainDb)
+    fun setVirtualizerStrength(strength: Int) = StudioEngineBridge.setVirtualizerStrength(strength)
+    fun setStereoBalance(balance: Float) = StudioEngineBridge.setStereoBalance(balance)
+    fun setMonoMix(enabled: Boolean) = StudioEngineBridge.setMonoMix(enabled)
+    fun setReverbPreset(preset: ReverbPreset) = StudioEngineBridge.setReverbPreset(preset)
+    fun resetStageAndRoom() = StudioEngineBridge.resetStageAndRoom()
     fun setSpeed(speed: Float) = StudioEngineBridge.setSpeed(speed)
     fun setPitch(pitch: Float) = StudioEngineBridge.setPitch(pitch)
+    fun setSkipSilence(enabled: Boolean) = StudioEngineBridge.setSkipSilence(enabled)
     fun resetTempoPitch() = StudioEngineBridge.resetTempoPitch()
     fun setCrossfadeSeconds(seconds: Int) = StudioEngineBridge.setCrossfadeSeconds(seconds)
     fun setSleepTimerMinutes(minutes: Int) = StudioEngineBridge.setSleepTimerMinutes(minutes)
